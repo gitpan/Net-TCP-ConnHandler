@@ -1,0 +1,34 @@
+Net-TCP-ConnHandler version 0.01
+================================
+
+Net::TCP::ConnHandler is a simple event driven framework for TCP sockets.
+It provides a simple protocol, with no intrinsic overhead (besides the 
+packet length information), allowing full control to the underlaying 
+socket, if necessary, but providing higher level ways of transmitting
+information.
+
+INSTALLATION
+
+To install this module type the following:
+
+   perl Makefile.PL
+   make
+   make test
+   make install
+
+DEPENDENCIES
+
+This module requires these other modules and libraries:
+
+  -Net::Socket::NonBlock	0.15 or higher 
+  (possibly earlier versions also work)
+
+COPYRIGHT AND LICENCE
+
+Copyright (C) 2004 by Nilson S. F. Junior
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself, either Perl version 5.8.3 or,
+at your option, any later version of Perl 5 you may have available.
+
+

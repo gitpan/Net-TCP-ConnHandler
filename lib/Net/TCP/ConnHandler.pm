@@ -1,0 +1,285 @@
+package Net::TCP::ConnHandler;
+
+use strict;
+use warnings;
+
+our $VERSION = '0.01';
+
+use Net::Socket::NonBlock;
+
+sub new {
+	my $class = shift;
+	my %args = @_;
+	my $self = {};
+	bless($self, $class);
+	if ($args{PacketUnpackString}) {
+		$self->{unpackstr} = $args{PacketUnpackString};
+		delete $args{PacketUnpackString};
+	}
+	elsif ($args{NoMsgType}) {
+		$self->{nomsgtype} = 1;
+		delete $args{NoMsgType};
+	}
+	else {
+		$self->{unpackstr} = "n a*";
+	}
+	$self->{socknest} = Net::Socket::NonBlock::Nest->new(%args)
+		or die "Error creating sockets nest: $@\n";
+	return $self;
+}
+
+sub Connect {
+	my $self = shift;
+	my %args = @_;
+	my $socket = $self->{socknest}->Connect(%args)
+		or $self->error("Couldn't connect to '$args{PeerAddr}:$args{PeerPort}': $@\n") and return;
+	$self->add_socket($socket);
+	return $socket;
+}
+
+sub Listen {
+	my $self = shift;
+	my %args = @_;
+	my $socket = $self->{socknest}->Listen(%args)
+		or $self->error("Couldn't listen on port '$args{LocalPort}': $@\n") and return;
+	$self->add_socket($socket);
+	return $socket;
+}
+
+sub Send {
+	my $self = shift;
+	my $socket = shift;
+	my $data = shift;
+	$socket->Send(pack("N a*", length $data, $data));
+}
+
+sub IO {
+	my $self = shift;
+	my $aryref = @_;
+	my $recvnum = $self->{socknest}->IO($aryref);
+	for my $socket ($self->get_sockets()) {
+		my $buf = undef;
+		if ($socket->{rx} == 0) { 
+			$buf = $socket->{obj}->Recv(4);
+			if ($buf) {
+				$socket->{rxlen} = unpack('N', $buf);
+				$socket->{rxbuf} = "";
+				$socket->{rx} = 1;
+			}
+			elsif (!defined $buf) {
+				$socket->Close();
+				$self->del_socket($socket);
+			}
+		}
+		if ($socket->{rx} == 1) {
+			my ($ip, $port);
+			($buf, $ip, $port) = $socket->{obj}->Recv($socket->{rxlen});
+			if ($buf) {
+				$socket->{r_addr} = $ip;
+				$socket->{r_port} = $port;
+				$socket->{rxlen} -= length $buf;
+				$socket->{rxbuf} .= $buf;
+				if ($socket->{rxlen} == 0) {
+					$socket->{rx} = 0;
+					my @packet;
+					if ($self->{unpackstr}) {
+						@packet = unpack($self->{unpackstr}, $socket->{rxbuf});
+					}
+					else { @packet = ("GENERIC", $socket->{rxbuf}) }
+					$self->handle($socket->{obj}, @packet);
+				}
+			}
+			elsif (!defined $buf) {
+				$socket->Close();
+				$self->del_socket($socket);
+			}
+		}
+	}
+	return $recvnum
+}
+
+sub add_socket {	
+	$_[0]->{sockets}->{$_[1]}->{obj}	= $_[1];
+	$_[0]->{sockets}->{$_[1]}->{rx}		= 0;
+	$_[0]->{sockets}->{$_[1]}->{rxlen}	= 0;
+	$_[0]->{sockets}->{$_[1]}->{rxbuf}	= "";
+}
+
+sub del_socket { delete $_[0]->{sockets}->{$_[1]} }
+sub get_sockets { values %{$_[0]->{sockets}} }
+
+sub set_handler {
+	my $self = shift;
+	my $hlist = shift;
+	$self->{handlers}->{$_} = $hlist->{$_} for (keys %$hlist);
+}
+
+sub set_handlers { set_handler(@_) }
+
+sub handle {
+	my $self = shift;
+	my $socket = shift;
+	my $msgtype = shift;
+	if ($self->is_handled($msgtype)) {
+		$self->{handlers}->{$msgtype}->($self, $socket, @_);
+	}
+	elsif ($self->is_handled('GENERIC')) {
+		$self->{handlers}->{'GENERIC'}->($self, $socket, $msgtype, @_);
+	}
+	else {
+		$self->error("Couldn't handle msgtype: $msgtype ($socket)\n");
+	}
+}
+
+sub is_handled {
+	my $self = shift;
+	my $msgtype = shift;
+	return 1 if $self->{handlers}->{$msgtype};
+}
+
+
+sub error {
+	my $self = shift;
+	if ($self->is_handled('ERROR')) { $self->handle('ERROR', @_) }
+	else { die @_ }
+}
+
+1;
+__END__
+
+=head1 NAME
+
+Net::TCP::ConnHandler - Simple, event driven, TCP sockets handling
+
+=head1 SYNOPSIS
+
+  use Net::TCP::ConnHandler;
+  my $nest = new Net::TCP::ConnHandler( 
+					NoMsgType => 1, 
+					debug => 1, 
+					SelectT => 0.01, 
+					BuffSize => 16384
+  );
+
+=head1 DESCRIPTION
+
+Net::TCP::ConnHandler is a simple event driven framework for TCP sockets.
+It provides a simple protocol, with no intrinsic overhead (besides the 
+packet length information), allowing full control to the underlaying 
+socket, if necessary, but providing higher level ways of transmitting
+information.
+
+This module is heavily based on Net::Socket::NonBlock so, if you plan on 
+using this module you better get familiar with Net::Socket::NonBlock also.
+
+
+=head1 METHODS
+
+=over 4
+
+=item my $nest = new Net::TCP::ConnHandler(%args)
+
+This method creates a new Net::TCP::ConnHandler object, which is similar to
+a Net::Socket::NonBlock nest.
+%args should consist of the arguments to be passed along to the Net::Socket::NonBlock
+nest constructor plus two additional (and optional) arguments. If you set "NoMsgType"
+to 1, no unpacking of the incoming packets will be done, and the only handler called
+will be the 'GENERIC' handle. "PacketUnpackString", if defined, will be used as the unpack
+string for incoming packets, the first argument *must* be the packet/message type if you
+plan on using the handlers correctly. The other arguments will be passed as an array to
+the handling subroutines. If "PacketUnpackString" is defined, "NoMsgType" is ignored.
+If both are not present, a default "PacketUnpackString" value of "n a*" is assumed.
+
+Note: even when "NoMsgType" is set, the module still prepends packetlength information to
+each packet sent and assumes all incoming packets also have it. It means that you can't
+make it function as a standard protocol server or client.
+
+=back
+
+=over 4
+
+=item my $connect = $nest->Connect(%args)
+
+This method creates a socket and connects to the specified PeerAddr and PeerPort.
+Internally, it also adds the resulting socket to the connection pool automatically.
+It returns a Net::Socket::NonBlock object (for additional info, read its manpage).
+
+=back
+
+=over 4
+
+=item my $listen = $nest->Listen(%args)
+
+This method creates a socket and starts listening at the specified LocalPort.
+For information on which arguments to use, read Net::Socket::NonBlock manpage.
+
+This method has one caveat: due to a limitation of Net::Socket::NonBlock, when executing
+the "Accept" callback, you need to add the new connection yourself to Net::TCP::ConnHandler's
+pool. Otherwise, it won't be monitored.
+
+=back
+
+=over 4
+
+=item $nest->Send($socket, $data)
+
+This method just prepends the packed $data length to the packet and Send()s it using Net::Socket::NonBlock's
+Send method. It returns whatever Net::Socket::NonBlock's Send() returned.
+
+=back
+
+=over 4
+
+=item $nest->set_handler({ msgtype => \&subroutine })
+
+This method is used in registering handlers for specific packet types. Its only 
+argument is a hashref in which keys are the packet types, as unpacked from the last
+packet received, and values are coderefs to be executed.
+When a handler subroutine is called it is passed the Net::TCP::ConnHandler object,
+followed by the Net::Socket::NonBlock object, and then the remaining packet data.
+
+There are two special handlers:
+The "GENERIC" handler is used when "NoMsgType" is on or when there's is no handler registered
+for a specific packet type. In this case, the handler also receives the msg type before the
+actual data.
+The "ERROR" handler is called whenever an error occurs, if no "ERROR" handler is registered the
+program die()s when an error is triggered.
+
+=back
+
+=over 4
+
+=item $nest->IO([\@aryref])
+
+This method works exactly as the Net::Socket::NonBlock IO() method. The only difference is that besides
+proccessing physical IO, it also calls any handler subroutine necessary.
+
+=back
+
+=over 4
+
+=item $nest->add_socket($socket)
+
+Adds the $socket to the $nest connection pool. This is mainly used inside Accept callbacks, but may have
+other uses. $socket must be a Net::Socket::NonBlock object.
+
+=back
+
+=head1 SEE ALSO
+
+L<Net::Socket::NonBlock>
+
+=head1 AUTHOR
+
+Nilson S. F. Junior <nilsonsfj@cpan.org>
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2004 by Nilson S. F. Junior
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself, either Perl version 5.8.3 or,
+at your option, any later version of Perl 5 you may have available.
+
+
+=cut
